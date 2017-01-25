@@ -1,0 +1,225 @@
+diff -u -r plasmaclock.orig/calendartable.cpp plasmaclock.new/calendartable.cpp
+--- plasmaclock.orig/calendartable.cpp	2013-08-02 19:27:11.998467964 +0800
++++ plasmaclock.new/calendartable.cpp	2013-08-20 11:09:34.667566721 +0800
+@@ -27,6 +27,7 @@
+ #include <QtCore/QTimer>
+ #include <QtGui/QPainter>
+ #include <QtGui/QWidget>
++#include <QtGui/QMenu>
+ #include <QtGui/QGraphicsSceneWheelEvent>
+ #include <QtGui/QStyleOptionGraphicsItem>
+ 
+@@ -50,6 +51,7 @@
+ #endif
+ 
+ #include <cmath>
++#include <sstream>
+ 
+ namespace Plasma
+ {
+@@ -103,6 +105,8 @@
+             QObject::connect(delayedPopulationTimer, SIGNAL(timeout()), q, SLOT(populateCalendar()));
+ 
+             setDate(initialDate);
++
++            useCustomFirstWeek = false;
+         }
+ 
+         ~CalendarTablePrivate()
+@@ -392,6 +396,9 @@
+         QDate viewStartDate;
+         QDate viewEndDate;
+ 
++        bool useCustomFirstWeek;
++        QDate customFirstWeekDate;
++
+         bool displayEvents;
+         bool displayHolidays;
+         Plasma::DataEngine *calendarDataEngine;
+@@ -447,17 +454,19 @@
+ };
+ 
+ CalendarTable::CalendarTable(const QDate &date, QGraphicsWidget *parent)
+-    : QGraphicsWidget(parent), d(new CalendarTablePrivate(this, date))
++    : QGraphicsWidget(parent), d(new CalendarTablePrivate(this, date)), myconfig("plasmaclockrc")
+ {
+     setAcceptHoverEvents(true);
+     setCacheMode(QGraphicsItem::DeviceCoordinateCache);
++    setConfigGroup();
+ }
+ 
+ CalendarTable::CalendarTable(QGraphicsWidget *parent)
+-    : QGraphicsWidget(parent), d(new CalendarTablePrivate(this))
++    : QGraphicsWidget(parent), d(new CalendarTablePrivate(this)), myconfig("plasmaclockrc")
+ {
+     setAcceptHoverEvents(true);
+     setCacheMode(QGraphicsItem::DeviceCoordinateCache);
++    setConfigGroup();
+ }
+ 
+ CalendarTable::~CalendarTable()
+@@ -465,6 +474,15 @@
+     delete d;
+ }
+ 
++void CalendarTable::setConfigGroup()
++{
++    mycg = myconfig.group("CustomWeek");
++    d->useCustomFirstWeek = mycg.readEntry("useCustomFirstWeek", false);
++    if (d->useCustomFirstWeek) {
++        d->customFirstWeekDate = mycg.readEntry("customFirstWeekDate", QDate());
++    }
++}
++
+ void CalendarTable::setCalendar(const QString &newCalendarType)
+ {
+     if (newCalendarType == d->calendarType) {
+@@ -883,6 +901,23 @@
+     update();
+ }
+ 
++void CalendarTable::SetCustomFirstWeek()
++{
++    int row = d->yToRow(d->lastSeenMousePos.y());
++    d->customFirstWeekDate = d->dateFromRowColumn(row, 0);
++    d->useCustomFirstWeek = true;
++    mycg.writeEntry("useCustomFirstWeek", true);
++    mycg.writeEntry("customFirstWeekDate", d->customFirstWeekDate);
++    update();
++}
++
++void CalendarTable::CancelCustomFirstWeek()
++{
++    d->useCustomFirstWeek = false;
++    mycg.writeEntry("useCustomFirstWeek", false);
++    update();
++}
++
+ void CalendarTable::applyConfiguration(KConfigGroup cg)
+ {
+     setCalendar(cg.readEntry("calendarType", "locale"));
+@@ -1001,9 +1036,28 @@
+     d->lastSeenMousePos = event->pos();
+ 
+     event->accept();
+-    QDate date = d->dateFromPoint(event->pos());
+-    setDate(date);
+-    emit dateSelected(date);
++
++    int weekday_w = cellX(0) - d->centeringSpace;
++    int weekday_y = cellY(0);
++    if ((event->pos().x() < weekday_w) && (event->pos().y() > weekday_y)) {
++        QMenu *menu = new QMenu();
++        QAction *Act_SetCustomFirstWeek;
++        Act_SetCustomFirstWeek = new QAction(tr("&Set this as custom first week"), this);
++        connect(Act_SetCustomFirstWeek, SIGNAL(triggered()), this, SLOT(SetCustomFirstWeek()));
++        menu->addAction(Act_SetCustomFirstWeek);
++        if (d->useCustomFirstWeek) {
++            QAction *Act_CancelCustomFirstWeek;
++            Act_CancelCustomFirstWeek = new QAction(tr("&Cancel custom first week"), this);
++            connect(Act_CancelCustomFirstWeek, SIGNAL(triggered()), this, SLOT(CancelCustomFirstWeek()));
++            menu->addAction(Act_CancelCustomFirstWeek);
++        }
++        menu->exec(QCursor::pos());
++        delete menu;
++    } else {
++        QDate date = d->dateFromPoint(event->pos());
++        setDate(date);
++        emit dateSelected(date);
++    }
+ }
+ 
+ void CalendarTable::mouseMoveEvent(QGraphicsSceneMouseEvent *event)
+@@ -1227,24 +1281,49 @@
+                 p->setOpacity(d->opacity);
+                 QString weekString;
+                 QString accurateWeekString;
+-                if (calendar()->isValid(cellDate)) {
+-                    weekString = calendar()->weekNumberString(cellDate);
+-                    accurateWeekString = weekString;
+-                    if (calendar()->dayOfWeek(cellDate) != Qt::Monday) {
+-                        QDate nextWeekDate = calendar()->addDays(cellDate, d->daysInWeek);
+-                        if (calendar()->isValid(nextWeekDate)) {
+-                            if (layoutDirection() == Qt::RightToLeft) {
+-                                accurateWeekString.prepend("/").prepend(calendar()->weekNumberString(nextWeekDate));
+-                            } else {
+-                                accurateWeekString.append("/").append(calendar()->weekNumberString(nextWeekDate));
+-                            }
++                if (d->useCustomFirstWeek) {
++                    if (calendar()->isValid(cellDate)) {
++                        int yearNumNow;
++                        int weekNow = calendar()->week(cellDate, &yearNumNow);
++                        int yearNumCustomFirstWeek;
++                        int weekCustomFirstWeek = calendar()->week(d->customFirstWeekDate, &yearNumCustomFirstWeek);
++                        if (yearNumNow >= yearNumCustomFirstWeek) {
++                           int weeks = 0;
++                           for (int yearbetween = yearNumCustomFirstWeek; yearbetween < yearNumNow; yearbetween++) {
++                               weeks += calendar()->weeksInYear(yearbetween);
++                           }
++                           weekNow += weeks;
++                           if (weekNow >= weekCustomFirstWeek) {
++                               int weekIndex =  weekNow - weekCustomFirstWeek + 1;
++                               std::stringstream ss;
++                               ss << weekIndex;
++                               std::string str;
++                               ss >> str;
++                               accurateWeekString = QString(QString::fromLocal8Bit(str.c_str()));
++                               weekString = accurateWeekString;
++                           }
+                         }
+-                        // ensure that weekString is the week number that has the most amout of days in the row
+-                        QDate middleWeekDate = calendar()->addDays(cellDate, floor(static_cast<float>(d->daysInWeek / 2)));
+-                        if (calendar()->isValid(middleWeekDate)) {
+-                            QString middleWeekString = calendar()->weekNumberString(middleWeekDate);
+-                            if (weekString != middleWeekString) {
+-                                weekString = middleWeekString;
++                    }
++		} else {
++                    if (calendar()->isValid(cellDate)) {
++                        weekString = calendar()->weekNumberString(cellDate);
++                        accurateWeekString = weekString;
++                        if (calendar()->dayOfWeek(cellDate) != Qt::Monday) {
++                            QDate nextWeekDate = calendar()->addDays(cellDate, d->daysInWeek);
++                            if (calendar()->isValid(nextWeekDate)) {
++                                if (layoutDirection() == Qt::RightToLeft) {
++                                    accurateWeekString.prepend("/").prepend(calendar()->weekNumberString(nextWeekDate));
++                                } else {
++                                    accurateWeekString.append("/").append(calendar()->weekNumberString(nextWeekDate));
++                                }
++                            }
++                            // ensure that weekString is the week number that has the most amout of days in the row
++                            QDate middleWeekDate = calendar()->addDays(cellDate, floor(static_cast<float>(d->daysInWeek / 2)));
++                            if (calendar()->isValid(middleWeekDate)) {
++                                QString middleWeekString = calendar()->weekNumberString(middleWeekDate);
++                                if (weekString != middleWeekString) {
++                                    weekString = middleWeekString;
++                                }
+                             }
+                         }
+                     }
+diff -u -r plasmaclock.orig/calendartable.h plasmaclock.new/calendartable.h
+--- plasmaclock.orig/calendartable.h	2013-08-02 19:27:11.998467964 +0800
++++ plasmaclock.new/calendartable.h	2013-08-20 11:09:38.943587925 +0800
+@@ -104,6 +104,8 @@
+ 
+ public Q_SLOTS:
+     void dataUpdated(const QString &source, const Plasma::DataEngine::Data &data);
++    void SetCustomFirstWeek();
++    void CancelCustomFirstWeek();
+ 
+ protected:
+     int cellX(int weekDay);
+@@ -121,10 +123,13 @@
+     virtual void paintBorder(QPainter *p, int cell, int week, int weekDay, CellTypes type, const QDate &cellDate);
+ 
+ private:
++    void setConfigGroup();
+     QString buildOccurrenceDescription(const Plasma::DataEngine::Data &occurrence) const;
+ 
+     friend class CalendarTablePrivate;
+     CalendarTablePrivate* const d;
++    KConfig myconfig;
++    KConfigGroup mycg;
+ 
+     Q_PRIVATE_SLOT(d, void populateCalendar())
+     Q_PRIVATE_SLOT(d, void settingsChanged(int category))
